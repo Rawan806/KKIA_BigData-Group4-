@@ -1,2 +1,2 @@
 # KKIA_BigData-Group4-
-Our BigDp
+Our Big Data project using Scala Spark
