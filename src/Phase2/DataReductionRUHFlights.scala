@@ -82,6 +82,6 @@ object DataReductionRUHFlights {
 
     println(s"Saved reduced CSV dataset to: $outCsvPath")
 
-    spark.stop()
+    // spark.stop()
   }
 }

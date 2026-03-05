@@ -154,6 +154,6 @@ object DataTransformationRUHFlights {
     model.write.overwrite().save(pipelinePath)
     println(s"Saved transformation pipeline to: $pipelinePath")
 
-    spark.stop()
+    // spark.stop()
   }
 }
