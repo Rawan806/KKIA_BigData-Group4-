@@ -149,7 +149,7 @@ var df = DataPreprocessingRUHFlights.buildPreprocessedData(spark)
     flatForCsv.coalesce(1).write.mode("overwrite").option("header", "true").csv(outCsvPath)
     println(s"Saved transformed CSV (flat indexed) to: $outCsvPath")
 
-    model.write.overwrite().save(pipelinePath)
+    //model.write.overwrite().save(pipelinePath)
     println(s"Saved transformation pipeline to: $pipelinePath")
 
     // spark.stop()

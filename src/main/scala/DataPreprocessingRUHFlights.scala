@@ -1,8 +1,30 @@
 import org.apache.spark.sql.{SparkSession, DataFrame, Column}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
+import java.io.PrintWriter
+import java.nio.file.{Files, Paths}
 
 object DataPreprocessingRUHFlights {
+  def escapeCsv(value: Any): String = {
+    val text = Option(value).getOrElse("").toString
+    "\"" + text.replace("\"", "\"\"") + "\""
+  }
+
+  def saveDataFrameAsCsvNoHadoop(df: DataFrame, outputPath: String): Unit = {
+    Files.createDirectories(Paths.get("results"))
+
+    val writer = new PrintWriter(outputPath)
+
+    writer.println(df.columns.map(escapeCsv).mkString(","))
+
+    val rows = df.toLocalIterator()
+    while (rows.hasNext) {
+      val row = rows.next()
+      writer.println(row.toSeq.map(escapeCsv).mkString(","))
+    }
+
+    writer.close()
+  }
 
   // Safe column accessor for dotted column names
   def c(name: String): Column = col(s"`$name`")
@@ -105,22 +127,52 @@ object DataPreprocessingRUHFlights {
     out
   }
 
-  def addPeakLabelByPercentile(df: DataFrame, percentile: Double = 0.90): (DataFrame, Double) = {
-    val hourly =
-      df.groupBy("hour_of_day")
-        .agg(count(lit(1)).alias("flights_in_hour"))
+  def addPeakLabelByTimeWindow(df: DataFrame, percentile: Double = 0.75): (DataFrame, Double) = {
+    var base = df
 
-    val q = hourly.stat.approxQuantile("flights_in_hour", Array(percentile), 0.0)
+    if (!base.columns.contains("scheduled_date_local") || !base.columns.contains("hour_of_day")) {
+      return (base.withColumn("peak_traffic_label", lit(0)), Double.PositiveInfinity)
+    }
+
+    // Terminal is part of operational congestion.
+    // If terminal is missing, use ALL so the code still works.
+    base =
+      if (base.columns.contains("movement.terminal")) {
+        base.withColumn(
+          "terminal_group",
+          when(c("movement.terminal").isNull || length(trim(c("movement.terminal"))) === 0, lit("UNKNOWN"))
+            .otherwise(c("movement.terminal"))
+        )
+      } else {
+        base.withColumn("terminal_group", lit("ALL"))
+      }
+
+    val windowCols = Seq(
+      "scheduled_date_local",
+      "hour_of_day",
+      "day_of_week",
+      "terminal_group"
+    )
+
+    val trafficWindows =
+      base.groupBy(windowCols.map(col): _*)
+        .agg(count(lit(1)).alias("flights_in_window"))
+
+    val q = trafficWindows.stat.approxQuantile("flights_in_window", Array(percentile), 0.0)
     val threshold = if (q.nonEmpty) q(0) else Double.PositiveInfinity
 
-    val labeledHourly =
-      hourly.withColumn(
+    val labeledWindows =
+      trafficWindows.withColumn(
         "peak_traffic_label",
-        when(col("flights_in_hour") >= lit(threshold), lit(1)).otherwise(lit(0))
+        when(col("flights_in_window") >= lit(threshold), lit(1)).otherwise(lit(0))
       )
 
     val out =
-      df.join(labeledHourly.select("hour_of_day", "peak_traffic_label"), Seq("hour_of_day"), "left")
+      base.join(
+          labeledWindows.select((windowCols.map(col) :+ col("peak_traffic_label") :+ col("flights_in_window")): _*),
+          windowCols,
+          "left"
+        )
         .withColumn("peak_traffic_label", when(col("peak_traffic_label").isNull, 0).otherwise(col("peak_traffic_label")))
 
     (out, threshold)
@@ -251,10 +303,10 @@ object DataPreprocessingRUHFlights {
     }
 
     if (clean.columns.contains("hour_of_day")) {
-      val (labeled, thr) = addPeakLabelByPercentile(clean, percentile = 0.90)
+      val (labeled, thr) = addPeakLabelByTimeWindow(clean, percentile = 0.75)
       clean = labeled
-      println("========== Peak Label Threshold (Percentile 0.9) ==========")
-      println(s"Hourly flights threshold = $thr")
+      println("========== Peak Label Threshold (Time Window Percentile 0.75) ==========")
+      println(s"Flights per date-hour-terminal threshold = $thr")
     }
 
     val afterRows = clean.count()
@@ -287,6 +339,18 @@ object DataPreprocessingRUHFlights {
 
       println("========== Peak Label Distribution ==========")
       clean.groupBy("peak_traffic_label").count().show(false)
+
+      println("========== Sample Traffic Windows ==========")
+      clean.select(
+          "scheduled_date_local",
+          "hour_of_day",
+          "day_of_week",
+          "terminal_group",
+          "flights_in_window",
+          "peak_traffic_label"
+        ).distinct()
+        .orderBy(desc("flights_in_window"))
+        .show(30, truncate = false)
     }
 
     clean
@@ -302,6 +366,16 @@ object DataPreprocessingRUHFlights {
 
     println("========== FINAL SNAPSHOT ==========")
     clean.show(20, truncate = false)
+
+    println("Saving preprocessed dataset without Spark CSV writer...")
+
+    val csvReady = clean
+      .withColumn("movement_quality", concat_ws(",", col("`movement.quality`")))
+      .drop("movement.quality")
+
+    saveDataFrameAsCsvNoHadoop(csvReady, "results/preprocessed_dataset.csv")
+
+    println("Preprocessed dataset saved to results/preprocessed_dataset.csv")
 
     spark.stop()
   }
